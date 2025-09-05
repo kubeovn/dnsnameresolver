@@ -2,6 +2,7 @@ package dnsnameresolver
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,31 +16,20 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// namespaceDNSInfo is used to store information regarding DNSNameResolver
-// objects. The map stores the namespaces where a DNSNameResolver object
-// corresponding to a DNS name is created.
-// key: namespace, value: object name.
-type namespaceDNSInfo map[string]string
-
 // DNSNameResolver is a plugin that looks up responses from other plugins
 // and updates the status of DNSNameResolver objects.
 type DNSNameResolver struct {
 	Next plugin.Handler
 
-	// configurable fields.
-	namespaces       map[string]struct{}
 	minimumTTL       int32
 	failureThreshold int32
 
 	// Data mapping for the regularDNSInfo and wildcardDNSInfo maps:
-	// DNS name --> Namespace --> DNSNameResolver object name.
-	// key: DNS name, value: namespaceDNSInfo map containing information
-	// about the namespaces where a DNSNameResolver object corresponding to
-	// the DNS name is created.
+	// DNS name --> DNSNameResolver object name.
 	// regularDNSInfo map is used for storing regular DNS name details.
-	regularDNSInfo map[string]namespaceDNSInfo
+	regularDNSInfo map[string]string
 	// wildcardDNSInfo map is used for storing wildcard DNS name details.
-	wildcardDNSInfo map[string]namespaceDNSInfo
+	wildcardDNSInfo map[string]string
 	// regularMapLock is used to serialize the access to the regularDNSInfo
 	// map.
 	regularMapLock sync.Mutex
@@ -58,9 +48,8 @@ type DNSNameResolver struct {
 // New returns an initialized DNSNameResolver with default settings.
 func New() *DNSNameResolver {
 	return &DNSNameResolver{
-		regularDNSInfo:   make(map[string]namespaceDNSInfo),
-		wildcardDNSInfo:  make(map[string]namespaceDNSInfo),
-		namespaces:       make(map[string]struct{}),
+		regularDNSInfo:   make(map[string]string),
+		wildcardDNSInfo:  make(map[string]string),
 		minimumTTL:       defaultMinTTL,
 		failureThreshold: defaultFailureThreshold,
 	}
@@ -94,55 +83,83 @@ func (resolver *DNSNameResolver) initInformer(networkClient kubeovnclient.Interf
 				return
 			}
 
-			dnsName := string(resolverObj.Spec.Name)
+			dnsName := strings.ToLower(string(resolverObj.Spec.Name))
 			// Check if the DNS name is wildcard or regular.
 			if isWildcard(dnsName) {
 				// If the DNS name is wildcard, add the details of the DNSNameResolver
 				// object to the wildcardDNSInfo map.
 				resolver.wildcardMapLock.Lock()
-				dnsInfoMap, dnsInfoExists := resolver.wildcardDNSInfo[dnsName]
-				// If details of DNS name and the DNSNameResolver objects already exist
-				// then check if the existing information match with the current one.
-				// In a namespace only one DNSNameResolver object should be created
-				// corresponding to a DNS name. If more than one DNSNameResolver object
-				// exists in a namespace corresponding to a DNS name, only the first
-				// object will be considered. Thus, if the existing information doesn't
-				// match, then don't proceed.
-				if dnsInfoExists {
-					if objName, objNameFound := dnsInfoMap[resolverObj.Namespace]; objNameFound && objName != resolverObj.Name {
-						resolver.wildcardMapLock.Unlock()
-						return
-					}
+				if existingObjName, exists := resolver.wildcardDNSInfo[dnsName]; exists && existingObjName != resolverObj.Name {
+					// If a different DNSNameResolver object already exists for this DNS name, skip
+					resolver.wildcardMapLock.Unlock()
+					return
 				}
-				if !dnsInfoExists {
-					dnsInfoMap = make(namespaceDNSInfo)
-				}
-				dnsInfoMap[resolverObj.Namespace] = resolverObj.Name
-				resolver.wildcardDNSInfo[dnsName] = dnsInfoMap
+				resolver.wildcardDNSInfo[dnsName] = resolverObj.Name
 				resolver.wildcardMapLock.Unlock()
 			} else {
 				// If the DNS name is regular, add the details of the DNSNameResolver
 				// object to the regularDNSInfo map.
 				resolver.regularMapLock.Lock()
-				dnsInfoMap, dnsInfoExists := resolver.regularDNSInfo[dnsName]
-				// If details of DNS name and the DNSNameResolver objects already exist
-				// then check if the existing information match with the current one.
-				// In a namespace only one DNSNameResolver object should be created
-				// corresponding to a DNS name. If more than one DNSNameResolver object
-				// exists in a namespace corresponding to a DNS name, only the first
-				// object will be considered. Thus, if the existing information doesn't
-				// match, then don't proceed.
-				if dnsInfoExists {
-					if objName, objNameFound := dnsInfoMap[resolverObj.Namespace]; objNameFound && objName != resolverObj.Name {
-						resolver.regularMapLock.Unlock()
-						return
-					}
+				if existingObjName, exists := resolver.regularDNSInfo[dnsName]; exists && existingObjName != resolverObj.Name {
+					// If a different DNSNameResolver object already exists for this DNS name, skip
+					resolver.regularMapLock.Unlock()
+					return
 				}
-				if !dnsInfoExists {
-					dnsInfoMap = make(namespaceDNSInfo)
+				resolver.regularDNSInfo[dnsName] = resolverObj.Name
+				resolver.regularMapLock.Unlock()
+			}
+		},
+		// Update event.
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			// Get the old and new DNSNameResolver objects.
+			oldResolverObj, oldOk := oldObj.(*kubeovnapiv1.DNSNameResolver)
+			newResolverObj, newOk := newObj.(*kubeovnapiv1.DNSNameResolver)
+			if !oldOk || !newOk {
+				log.Infof("objects not of type DNSNameResolver: old=%v, new=%v", oldObj, newObj)
+				return
+			}
+
+			oldDNSName := strings.ToLower(string(oldResolverObj.Spec.Name))
+			newDNSName := strings.ToLower(string(newResolverObj.Spec.Name))
+
+			// If the DNS name hasn't changed, no need to update mappings
+			if oldDNSName == newDNSName {
+				return
+			}
+
+			// Remove old mapping
+			if isWildcard(oldDNSName) {
+				resolver.wildcardMapLock.Lock()
+				if existingObjName, exists := resolver.wildcardDNSInfo[oldDNSName]; exists && existingObjName == oldResolverObj.Name {
+					delete(resolver.wildcardDNSInfo, oldDNSName)
 				}
-				dnsInfoMap[resolverObj.Namespace] = resolverObj.Name
-				resolver.regularDNSInfo[dnsName] = dnsInfoMap
+				resolver.wildcardMapLock.Unlock()
+			} else {
+				resolver.regularMapLock.Lock()
+				if existingObjName, exists := resolver.regularDNSInfo[oldDNSName]; exists && existingObjName == oldResolverObj.Name {
+					delete(resolver.regularDNSInfo, oldDNSName)
+				}
+				resolver.regularMapLock.Unlock()
+			}
+
+			// Add new mapping
+			if isWildcard(newDNSName) {
+				resolver.wildcardMapLock.Lock()
+				if existingObjName, exists := resolver.wildcardDNSInfo[newDNSName]; exists && existingObjName != newResolverObj.Name {
+					// If a different DNSNameResolver object already exists for this DNS name, skip
+					resolver.wildcardMapLock.Unlock()
+					return
+				}
+				resolver.wildcardDNSInfo[newDNSName] = newResolverObj.Name
+				resolver.wildcardMapLock.Unlock()
+			} else {
+				resolver.regularMapLock.Lock()
+				if existingObjName, exists := resolver.regularDNSInfo[newDNSName]; exists && existingObjName != newResolverObj.Name {
+					// If a different DNSNameResolver object already exists for this DNS name, skip
+					resolver.regularMapLock.Unlock()
+					return
+				}
+				resolver.regularDNSInfo[newDNSName] = newResolverObj.Name
 				resolver.regularMapLock.Unlock()
 			}
 		},
@@ -155,42 +172,22 @@ func (resolver *DNSNameResolver) initInformer(networkClient kubeovnclient.Interf
 				return
 			}
 
-			dnsName := string(resolverObj.Spec.Name)
+			dnsName := strings.ToLower(string(resolverObj.Spec.Name))
 			// Check if the DNS name is wildcard or regular.
 			if isWildcard(dnsName) {
 				// If the DNS name is wildcard, delete the details of the DNSNameResolver
 				// object from the wildcardDNSInfo map.
 				resolver.wildcardMapLock.Lock()
-				if dnsInfoMap, exists := resolver.wildcardDNSInfo[dnsName]; exists {
-					// If details of DNS name and the DNSNameResolver objects already exist
-					// then check if the existing information match with the current one.
-					// Otherwise, don't proceed.
-					if dnsInfoMap[resolverObj.Namespace] == resolverObj.Name {
-						delete(dnsInfoMap, resolverObj.Namespace)
-						if len(dnsInfoMap) > 0 {
-							resolver.wildcardDNSInfo[dnsName] = dnsInfoMap
-						} else {
-							delete(resolver.wildcardDNSInfo, dnsName)
-						}
-					}
+				if existingObjName, exists := resolver.wildcardDNSInfo[dnsName]; exists && existingObjName == resolverObj.Name {
+					delete(resolver.wildcardDNSInfo, dnsName)
 				}
 				resolver.wildcardMapLock.Unlock()
 			} else {
 				// If the DNS name is regular, delete the details of the DNSNameResolver
 				// object from the regularDNSInfo map.
 				resolver.regularMapLock.Lock()
-				if dnsInfoMap, exists := resolver.regularDNSInfo[dnsName]; exists {
-					// If details of DNS name and the DNSNameResolver objects already exist
-					// then check if the existing information match with the current one.
-					// Otherwise, don't proceed.
-					if dnsInfoMap[resolverObj.Namespace] == resolverObj.Name {
-						delete(dnsInfoMap, resolverObj.Namespace)
-						if len(dnsInfoMap) > 0 {
-							resolver.regularDNSInfo[dnsName] = dnsInfoMap
-						} else {
-							delete(resolver.regularDNSInfo, dnsName)
-						}
-					}
+				if existingObjName, exists := resolver.regularDNSInfo[dnsName]; exists && existingObjName == resolverObj.Name {
+					delete(resolver.regularDNSInfo, dnsName)
 				}
 				resolver.regularMapLock.Unlock()
 			}

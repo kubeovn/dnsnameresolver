@@ -20,7 +20,12 @@ func getWildcard(dnsName string) string {
 	if isWildcard(dnsName) {
 		return dnsName
 	}
-	return "*" + dnsName[strings.Index(dnsName, "."):]
+	dotIndex := strings.Index(dnsName, ".")
+	if dotIndex == -1 {
+		// If there's no dot, return the original name (not a valid FQDN case)
+		return dnsName
+	}
+	return "*" + dnsName[dotIndex:]
 }
 
 // isSameNextLookupTime checks if the existing next lookup time (existing last lookup time + existing ttl)

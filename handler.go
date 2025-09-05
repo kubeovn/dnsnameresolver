@@ -52,21 +52,27 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 	// Get the DNS name from the DNS lookup request.
 	qname := strings.ToLower(state.QName())
 
-	var regularDnsInfo, wildcardDnsInfo namespaceDNSInfo
+	var regularDnsInfo, wildcardDnsInfo string
 	var regularDNSExists, wildcardDNSExists bool
 
 	// Check if the query was for a wildcard DNS name or a regular DNS name.
 	if isWildcard(qname) {
 		// Get the wildcard DNS name info, if it exists.
+		resolver.wildcardMapLock.Lock()
 		wildcardDnsInfo, wildcardDNSExists = resolver.wildcardDNSInfo[qname]
+		resolver.wildcardMapLock.Unlock()
 	} else {
 		// Get the regular DNS name info, if it exists.
+		resolver.regularMapLock.Lock()
 		regularDnsInfo, regularDNSExists = resolver.regularDNSInfo[qname]
+		resolver.regularMapLock.Unlock()
 
 		// Get the corresponding wildcard DNS name for the reguar DNS name.
 		wildcard := getWildcard(qname)
 		// Get the wildcard DNS name info, if it exists.
+		resolver.wildcardMapLock.Lock()
 		wildcardDnsInfo, wildcardDNSExists = resolver.wildcardDNSInfo[wildcard]
+		resolver.wildcardMapLock.Unlock()
 	}
 
 	// If neither regular DNS name info nor wildcard DNS name info exists for the DNS name
@@ -183,183 +189,166 @@ func (resolver *DNSNameResolver) Name() string { return pluginName }
 // updateResolvedNamesSuccess updates the ResolvedNames field of the corresponding DNSNameResolver object when DNS lookup is successfully completed.
 func (resolver *DNSNameResolver) updateResolvedNamesSuccess(
 	ctx context.Context,
-	namespaceDNS namespaceDNSInfo,
+	objName string,
 	dnsName string,
 	ipTTLs map[string]int32,
 ) {
-	// WaitGroup variable used to wait for the completion of update of DNSNameResolver CRs
-	// for the same DNS name in different namespaces.
-	var wg sync.WaitGroup
+	previousResourceVersion := "0"
+	// Retry the update of the DNSNameResolver object if there's a conflict during the update.
+	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var (
+			resolverObj     *kubeovnapiv1.DNSNameResolver
+			resourceVersion string
+			err             error
+		)
 
-	// Iterate through the namespaces and the corresponding DNSNameResolver object names.
-	for namespace, objName := range namespaceDNS {
-		wg.Add(1)
-
-		// Each update is performed in separate goroutine.
-		go func(namespace string, objName string) {
-			defer wg.Done()
-
-			previousResourceVersion := "0"
-			// Retry the update of the DNSNameResolver object if there's a conflict during the update.
-			retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				var (
-					resolverObj     *kubeovnapiv1.DNSNameResolver
-					resourceVersion string
-					err             error
-				)
-
-				// Fetch the DNSNameResolver object using the lister first.
-				resolverObj, err = lister.NewDNSNameResolverLister(
-					resolver.dnsNameResolverInformer.GetIndexer()).Get(objName)
-				if err != nil {
-					return err
-				}
-				resourceVersion = resolverObj.GetResourceVersion()
-				// Check if the current and the previous resource version match or not.
-				if resourceVersion == previousResourceVersion {
-					listerResourceVersion := resourceVersion
-					// This indicates that there was a conflict and the lister has not caught up.
-					// So fetch the DNSNameResolver object using the client.
-					resolverObj, err = resolver.kubeovnClient.DNSNameResolvers().Get(ctx, objName, metav1.GetOptions{})
-					if err != nil {
-						return err
-					}
-					resourceVersion = resolverObj.GetResourceVersion()
-					log.Infof("lister was stale at resourceVersion=%v, live get showed resourceVersion=%v", listerResourceVersion, resourceVersion)
-				}
-				previousResourceVersion = resourceVersion
-
-				// Make a copy of the object. All the updates will be applied to the copied object.
-				newResolverObj := resolverObj.DeepCopy()
-				// Get the DNS name from the spec.name field.
-				specDNSName := string(newResolverObj.Spec.Name)
-				// Get the current time.
-				currentTime := metav1.NewTime(time.Now())
-
-				// existingIndex gives the index of the of the resolved name corresponding to the
-				// DNS name, which is currently being looked up, if it exists.
-				var existingIndex int
-				// foundResolvedName indicates whether the resolved name corresponding to the DNS name,
-				// which is currently being looked up, was found or not.
-				foundResolvedName := false
-				// matchedWildcard indicates whether the current regular DNS name being looked up
-				// completely matches the resolved name entry of the wildcard DNS name corresponding
-				// to the DNSNameResolver object. For the match to succeed, the IP addresses associated
-				// with the regular DNS name should be contained in the list of IP addresses present
-				// in the resolved name entry of the wildcard DNS name. If the current DNS name being
-				// looked up is regular or the DNSNameResolver object corresponds to a regular DNS
-				// name then the value of matchedWildcard will be false.
-				matchedWildcard := false
-				// statusUpdated indicates whether the status of the DNSNameResolver object should
-				// be updated or not.
-				statusUpdated := false
-				// indicesMatchingWildcard contains the existing resolved name entries of the regular
-				// DNS names completely matching that of the wildcard DNS name's resolved name entry.
-				// This map will contain the indices only when the DNSNameResolver object is for a
-				// wildcard DNS name and the DNS name lookup is also for the same DNS name.
-				indicesMatchingWildcard := []int{}
-
-				// Iterate through each resolved name present in the status of the DNSNameResolver object.
-				//
-				// NOTE: The resolved name for a wildcard DNS name, if it exists, will always be the first one in the list of
-				// resolved names in the status of the DNSNameResolver object corresponding to the wildcard DNS name.
-				for index, resolvedName := range newResolverObj.Status.ResolvedNames {
-					if isWildcard(specDNSName) && !isWildcard(dnsName) && strings.EqualFold(string(resolvedName.DNSName), specDNSName) {
-						// Case 1: When the DNSNameResolver object is for a wildcard DNS name, the lookup is for a regular DNS name
-						// which matches the wildcard DNS name, and the current resolved name is for the wildcard DNS name.
-
-						// Check if the regular DNS name completely matches the resolved name entry of the wildcard DNS name.
-						// The regular DNS name will completely match the wildcard DNS name if all the IP addresses that are received
-						// in the response of the DNS name lookup already exists in the wildcard DNS name's resolved name field, the
-						// corresponding next lookup time of the IP addresses also matches.
-						matchedWildcard = isMatchingResolvedName(ipTTLs, resolvedName)
-					} else if strings.EqualFold(string(resolvedName.DNSName), dnsName) {
-						// Case 2: When the DNS name which is being resolved matches the current resolved name. This is applicable
-						// for DNSNameResolver objects for both the regular and wildcard DNS names.
-
-						// If matchedWildcard is set to true, then the DNS lookup is for a regular DNS name and the DNSNameResolver
-						// object is corresponding to a wildcard DNS name. The IP addresses that are received in the response of the
-						// DNS name lookup already exists in the wildcard DNS name's resolved name field. However, as the regular
-						// DNS name's resolved name also exists, it means that some of the existing IP addresses associated with the
-						// regular DNS name do not match with the IP addresses associated with the wildcard DNS name. Thus,
-						// matchedWildcard is set to false.
-						matchedWildcard = false
-
-						// As the resolved name for the DNS name being looked up is found, set foundResolvedName to true.
-						foundResolvedName = true
-						// Set existingIndex to the current value of the index variable to indicate the index at which the
-						// resolved name corresponding to the DNS name exists.
-						existingIndex = index
-
-						// If any of the IP address already exists, it's corresponding TTL and last lookup time will be updated if
-						// the next lookup time (TTL + last lookup time) has changed.
-						//
-						// The IP addresses which do not already exist, will be added to the existing resolvedAddresses list.
-						//
-						// The resolutionFailures field will be set to zero. If the conditions field is not set or if the existing
-						// status of the "Degraded" condition is not false, then the status of the condition will be set to false,
-						// reason and message will be set to corresponding to that of success rcode.
-						statusUpdated = addUpdateResolvedNameIPTTLs(index, ipTTLs, currentTime, newResolverObj)
-					} else if isWildcard(dnsName) {
-						// Case 3: When the DNSNameResolver object is for a wildcard DNS name, the lookup is also for the wildcard DNS name,
-						// and the current resolved name is for a regular DNS name which matches the wildcard DNS name.
-
-						// Check if the resolved name for the regular DNS name completely matches the wildcard DNS name corresponding to the
-						// DNSNameResolver object, along with the IP addresses. If it matches then add the index of the resolved name entry
-						// of the regular DNS name to the indicesMatchingWildcard map.
-						if isRegularMatchingWildcardResolvedName(foundResolvedName, newResolverObj, resolvedName, ipTTLs, currentTime) {
-							indicesMatchingWildcard = append(indicesMatchingWildcard, index)
-						}
-					}
-
-					// Skip all the remaining resolved names, if the DNS lookup is for a regular DNS name, the DNSNameResolver object
-					// is corresponding to a wildcard DNS name, the regular DNS name's resolved name field is already found, and the
-					// check for the complete match of the regular DNS name with the wildcard DNS name has already been performed.
-					if !isWildcard(dnsName) && isWildcard(specDNSName) && foundResolvedName && index > 0 {
-						break
-					}
-				}
-
-				// If the DNS lookup is for a wildcard DNS name, then remove the existing resolved name entries of the regular DNS names
-				// completely matching that of the wildcard DNS name's resolved name entry.
-				if isWildcard(dnsName) {
-					isRemoved := removeResolvedNames(indicesMatchingWildcard, newResolverObj)
-					statusUpdated = statusUpdated || isRemoved
-				}
-
-				if !isWildcard(dnsName) && matchedWildcard {
-					// Remove the regular DNS name's resolved name entry which completely matches that of the wildcard DNS name's resolved name.
-
-					indexList := []int{}
-					// Add the index of the regular DNS name's resolved name entry to the indexList, if it is found.
-					if foundResolvedName {
-						indexList = append(indexList, existingIndex)
-					}
-					isRemoved := removeResolvedNames(indexList, newResolverObj)
-					statusUpdated = statusUpdated || isRemoved
-				} else if !foundResolvedName {
-					// Add the resolved name entry for the DNS name (applies to both regular and wildcard DNS names) if the entry is not found.
-					addResolvedName(dnsName, currentTime, ipTTLs, newResolverObj)
-					statusUpdated = true
-				}
-
-				// If there are no changes to the status of the DNSNameResolver object then skip the update status call.
-				if !statusUpdated {
-					return nil
-				}
-
-				// Update the status of the DNSNameResolver object.
-				_, err = resolver.kubeovnClient.DNSNameResolvers().UpdateStatus(ctx, newResolverObj, metav1.UpdateOptions{})
+		// Fetch the DNSNameResolver object using the lister first.
+		resolverObj, err = lister.NewDNSNameResolverLister(
+			resolver.dnsNameResolverInformer.GetIndexer()).Get(objName)
+		if err != nil {
+			return err
+		}
+		resourceVersion = resolverObj.GetResourceVersion()
+		// Check if the current and the previous resource version match or not.
+		if resourceVersion == previousResourceVersion {
+			listerResourceVersion := resourceVersion
+			// This indicates that there was a conflict and the lister has not caught up.
+			// So fetch the DNSNameResolver object using the client.
+			resolverObj, err = resolver.kubeovnClient.DNSNameResolvers().Get(ctx, objName, metav1.GetOptions{})
+			if err != nil {
 				return err
-			})
-			if retryErr != nil {
-				log.Errorf("Encountered error while updating status of DNSNameResolver object: %v", retryErr)
 			}
-		}(namespace, objName)
-	}
+			resourceVersion = resolverObj.GetResourceVersion()
+			log.Infof("lister was stale at resourceVersion=%v, live get showed resourceVersion=%v", listerResourceVersion, resourceVersion)
+		}
+		previousResourceVersion = resourceVersion
 
-	// Wait for the goroutines for each namespace to complete.
-	wg.Wait()
+		// Make a copy of the object. All the updates will be applied to the copied object.
+		newResolverObj := resolverObj.DeepCopy()
+		// Get the DNS name from the spec.name field.
+		specDNSName := string(newResolverObj.Spec.Name)
+		// Get the current time.
+		currentTime := metav1.NewTime(time.Now())
+
+		// existingIndex gives the index of the of the resolved name corresponding to the
+		// DNS name, which is currently being looked up, if it exists.
+		var existingIndex int
+		// foundResolvedName indicates whether the resolved name corresponding to the DNS name,
+		// which is currently being looked up, was found or not.
+		foundResolvedName := false
+		// matchedWildcard indicates whether the current regular DNS name being looked up
+		// completely matches the resolved name entry of the wildcard DNS name corresponding
+		// to the DNSNameResolver object. For the match to succeed, the IP addresses associated
+		// with the regular DNS name should be contained in the list of IP addresses present
+		// in the resolved name entry of the wildcard DNS name. If the current DNS name being
+		// looked up is regular or the DNSNameResolver object corresponds to a regular DNS
+		// name then the value of matchedWildcard will be false.
+		matchedWildcard := false
+		// statusUpdated indicates whether the status of the DNSNameResolver object should
+		// be updated or not.
+		statusUpdated := false
+		// indicesMatchingWildcard contains the existing resolved name entries of the regular
+		// DNS names completely matching that of the wildcard DNS name's resolved name entry.
+		// This map will contain the indices only when the DNSNameResolver object is for a
+		// wildcard DNS name and the DNS name lookup is also for the same DNS name.
+		indicesMatchingWildcard := []int{}
+
+		// Iterate through each resolved name present in the status of the DNSNameResolver object.
+		//
+		// NOTE: The resolved name for a wildcard DNS name, if it exists, will always be the first one in the list of
+		// resolved names in the status of the DNSNameResolver object corresponding to the wildcard DNS name.
+		for index, resolvedName := range newResolverObj.Status.ResolvedNames {
+			if isWildcard(specDNSName) && !isWildcard(dnsName) && strings.EqualFold(string(resolvedName.DNSName), specDNSName) {
+				// Case 1: When the DNSNameResolver object is for a wildcard DNS name, the lookup is for a regular DNS name
+				// which matches the wildcard DNS name, and the current resolved name is for the wildcard DNS name.
+
+				// Check if the regular DNS name completely matches the resolved name entry of the wildcard DNS name.
+				// The regular DNS name will completely match the wildcard DNS name if all the IP addresses that are received
+				// in the response of the DNS name lookup already exists in the wildcard DNS name's resolved name field, the
+				// corresponding next lookup time of the IP addresses also matches.
+				matchedWildcard = isMatchingResolvedName(ipTTLs, resolvedName)
+			} else if strings.EqualFold(string(resolvedName.DNSName), dnsName) {
+				// Case 2: When the DNS name which is being resolved matches the current resolved name. This is applicable
+				// for DNSNameResolver objects for both the regular and wildcard DNS names.
+
+				// If matchedWildcard is set to true, then the DNS lookup is for a regular DNS name and the DNSNameResolver
+				// object is corresponding to a wildcard DNS name. The IP addresses that are received in the response of the
+				// DNS name lookup already exists in the wildcard DNS name's resolved name field. However, as the regular
+				// DNS name's resolved name also exists, it means that some of the existing IP addresses associated with the
+				// regular DNS name do not match with the IP addresses associated with the wildcard DNS name. Thus,
+				// matchedWildcard is set to false.
+				matchedWildcard = false
+
+				// As the resolved name for the DNS name being looked up is found, set foundResolvedName to true.
+				foundResolvedName = true
+				// Set existingIndex to the current value of the index variable to indicate the index at which the
+				// resolved name corresponding to the DNS name exists.
+				existingIndex = index
+
+				// If any of the IP address already exists, it's corresponding TTL and last lookup time will be updated if
+				// the next lookup time (TTL + last lookup time) has changed.
+				//
+				// The IP addresses which do not already exist, will be added to the existing resolvedAddresses list.
+				//
+				// The resolutionFailures field will be set to zero. If the conditions field is not set or if the existing
+				// status of the "Degraded" condition is not false, then the status of the condition will be set to false,
+				// reason and message will be set to corresponding to that of success rcode.
+				statusUpdated = addUpdateResolvedNameIPTTLs(index, ipTTLs, currentTime, newResolverObj)
+			} else if isWildcard(dnsName) {
+				// Case 3: When the DNSNameResolver object is for a wildcard DNS name, the lookup is also for the wildcard DNS name,
+				// and the current resolved name is for a regular DNS name which matches the wildcard DNS name.
+
+				// Check if the resolved name for the regular DNS name completely matches the wildcard DNS name corresponding to the
+				// DNSNameResolver object, along with the IP addresses. If it matches then add the index of the resolved name entry
+				// of the regular DNS name to the indicesMatchingWildcard map.
+				if isRegularMatchingWildcardResolvedName(foundResolvedName, newResolverObj, resolvedName, ipTTLs, currentTime) {
+					indicesMatchingWildcard = append(indicesMatchingWildcard, index)
+				}
+			}
+
+			// Skip all the remaining resolved names, if the DNS lookup is for a regular DNS name, the DNSNameResolver object
+			// is corresponding to a wildcard DNS name, the regular DNS name's resolved name field is already found, and the
+			// check for the complete match of the regular DNS name with the wildcard DNS name has already been performed.
+			if !isWildcard(dnsName) && isWildcard(specDNSName) && foundResolvedName && index > 0 {
+				break
+			}
+		}
+
+		// If the DNS lookup is for a wildcard DNS name, then remove the existing resolved name entries of the regular DNS names
+		// completely matching that of the wildcard DNS name's resolved name entry.
+		if isWildcard(dnsName) {
+			isRemoved := removeResolvedNames(indicesMatchingWildcard, newResolverObj)
+			statusUpdated = statusUpdated || isRemoved
+		}
+
+		if !isWildcard(dnsName) && matchedWildcard {
+			// Remove the regular DNS name's resolved name entry which completely matches that of the wildcard DNS name's resolved name.
+
+			indexList := []int{}
+			// Add the index of the regular DNS name's resolved name entry to the indexList, if it is found.
+			if foundResolvedName {
+				indexList = append(indexList, existingIndex)
+			}
+			isRemoved := removeResolvedNames(indexList, newResolverObj)
+			statusUpdated = statusUpdated || isRemoved
+		} else if !foundResolvedName {
+			// Add the resolved name entry for the DNS name (applies to both regular and wildcard DNS names) if the entry is not found.
+			addResolvedName(dnsName, currentTime, ipTTLs, newResolverObj)
+			statusUpdated = true
+		}
+
+		// If there are no changes to the status of the DNSNameResolver object then skip the update status call.
+		if !statusUpdated {
+			return nil
+		}
+
+		// Update the status of the DNSNameResolver object.
+		_, err = resolver.kubeovnClient.DNSNameResolvers().UpdateStatus(ctx, newResolverObj, metav1.UpdateOptions{})
+		return err
+	})
+	if retryErr != nil {
+		log.Errorf("Encountered error while updating status of DNSNameResolver object: %v", retryErr)
+	}
 }
 
 // isMatchingResolvedName checks if all the IP addresses in the ipTTLs map are contained
@@ -568,120 +557,103 @@ func addResolvedName(
 }
 
 // updateResolvedNamesFailure updates the ResolvedNames field of the corresponding DNSNameResolver object.
-func (resolver *DNSNameResolver) updateResolvedNamesFailure(ctx context.Context, namespaceDNS namespaceDNSInfo, dnsName string, rcode int) {
-	// WaitGroup variable used to wait for the completion of update of DNSNameResolver CRs
-	// for the same DNS name in different namespaces.
-	var wg sync.WaitGroup
-
-	// Iterate through the namespaces and the corresponding DNSNameResolver object names.
-	for namespace, objName := range namespaceDNS {
-		wg.Add(1)
-
-		// Each update is performed in separate goroutine.
-		go func(namespace string, objName string) {
-			defer wg.Done()
-
-			previousResourceVersion := "0"
-			// Retry the update of the DNSNameResolver object if there's a conflict during the update.
-			retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				var (
-					resolverObj     *kubeovnapiv1.DNSNameResolver
-					resourceVersion string
-					err             error
-				)
-				// Fetch the DNSNameResolver object using the lister first.
-				resolverObj, err = lister.NewDNSNameResolverLister(
-					resolver.dnsNameResolverInformer.GetIndexer()).Get(objName)
-				if err != nil {
-					return err
-				}
-				resourceVersion = resolverObj.GetResourceVersion()
-				// Check if the current and the previous resource version match or not.
-				if resourceVersion == previousResourceVersion {
-					listerResourceVersion := resourceVersion
-					// This indicates that there was a conflict and the lister has not caught up.
-					// So fetch the DNSNameResolver object using the client.
-					resolverObj, err = resolver.kubeovnClient.DNSNameResolvers().Get(ctx, objName, metav1.GetOptions{})
-					if err != nil {
-						return err
-					}
-					resourceVersion = resolverObj.GetResourceVersion()
-					log.Infof("lister was stale at resourceVersion=%v, live get showed resourceVersion=%v", listerResourceVersion, resourceVersion)
-				}
-				previousResourceVersion = resourceVersion
-
-				// Make a copy of the object. All the updates will be applied to the copied object.
-				newResolverObj := resolverObj.DeepCopy()
-				// Get the current time.
-				currentTime := metav1.NewTime(time.Now())
-
-				// existingIndex gives the index of the of the resolved name corresponding to the
-				// DNS name, which is currently being looked up, if it exists.
-				var existingIndex int
-				// foundResolvedName indicates whether the resolved name corresponding to the DNS name,
-				// which is currently being looked up, was found or not.
-				foundResolvedName := false
-				// removeResolvedName indicates whether the resolved name entry corresponding to the
-				// DNS name being looked up needs to be removed or not. The value of removeResolvedName
-				// will be true if the value of resolutionFailures of the resolved name is greater than
-				// equal to the configured failure threshold, otherwise the value of removeResolvedName
-				// will be false.
-				removeResolvedName := false
-				// statusUpdated indicates whether the status of the DNSNameResolver object should
-				// be updated or not.
-				statusUpdated := false
-
-				// Iterate through each resolved name present in the status of the DNSNameResolver object.
-				for index, resolvedName := range newResolverObj.Status.ResolvedNames {
-
-					// Check if the DNS name which is being resolved matches the current resolved name.
-					if strings.EqualFold(string(resolvedName.DNSName), dnsName) {
-
-						// As the resolved name for the DNS name being looked up is found, set foundResolvedName to true.
-						foundResolvedName = true
-						// Set existingIndex to the current value of the index variable to indicate the index at which the
-						// resolved name corresponding to the DNS name exists.
-						existingIndex = index
-
-						// Check whether the resolved name for the DNS name needs to be removed or not. If not, then update
-						// the resolved name entry to reflect the failure in DNS resolution.
-						removeResolvedName, statusUpdated =
-							checkAndUpdateResolvedName(index, newResolverObj, currentTime, resolver.failureThreshold, resolver.minimumTTL, rcode)
-					}
-
-					// Skip all the remaining resolved names, if the DNS name's resolved name is already found.
-					if foundResolvedName {
-						break
-					}
-				}
-
-				if !foundResolvedName {
-					// If the resolved name entry is not found then no update operation is required.
-					return nil
-				} else if removeResolvedName {
-					// Remove the resolved name entry if the resolutionFailures field's value is greater than or equal
-					// to the failure threshold.
-					newResolverObj.Status.ResolvedNames = append(newResolverObj.Status.ResolvedNames[:existingIndex], newResolverObj.Status.ResolvedNames[existingIndex+1:]...)
-					statusUpdated = true
-				}
-
-				// If there are no changes to the status of the DNSNameResolver object then skip the update status call.
-				if !statusUpdated {
-					return nil
-				}
-
-				// Update the status of the DNSNameResolver object.
-				_, err = resolver.kubeovnClient.DNSNameResolvers().UpdateStatus(ctx, newResolverObj, metav1.UpdateOptions{})
+func (resolver *DNSNameResolver) updateResolvedNamesFailure(ctx context.Context, objName string, dnsName string, rcode int) {
+	previousResourceVersion := "0"
+	// Retry the update of the DNSNameResolver object if there's a conflict during the update.
+	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var (
+			resolverObj     *kubeovnapiv1.DNSNameResolver
+			resourceVersion string
+			err             error
+		)
+		// Fetch the DNSNameResolver object using the lister first.
+		resolverObj, err = lister.NewDNSNameResolverLister(
+			resolver.dnsNameResolverInformer.GetIndexer()).Get(objName)
+		if err != nil {
+			return err
+		}
+		resourceVersion = resolverObj.GetResourceVersion()
+		// Check if the current and the previous resource version match or not.
+		if resourceVersion == previousResourceVersion {
+			listerResourceVersion := resourceVersion
+			// This indicates that there was a conflict and the lister has not caught up.
+			// So fetch the DNSNameResolver object using the client.
+			resolverObj, err = resolver.kubeovnClient.DNSNameResolvers().Get(ctx, objName, metav1.GetOptions{})
+			if err != nil {
 				return err
-			})
-			if retryErr != nil {
-				log.Errorf("Encountered error while updating status of DNSNameResolver object: %v", retryErr)
 			}
-		}(namespace, objName)
-	}
+			resourceVersion = resolverObj.GetResourceVersion()
+			log.Infof("lister was stale at resourceVersion=%v, live get showed resourceVersion=%v", listerResourceVersion, resourceVersion)
+		}
+		previousResourceVersion = resourceVersion
 
-	// Wait for the goroutines for each namespace to complete.
-	wg.Wait()
+		// Make a copy of the object. All the updates will be applied to the copied object.
+		newResolverObj := resolverObj.DeepCopy()
+		// Get the current time.
+		currentTime := metav1.NewTime(time.Now())
+
+		// existingIndex gives the index of the of the resolved name corresponding to the
+		// DNS name, which is currently being looked up, if it exists.
+		var existingIndex int
+		// foundResolvedName indicates whether the resolved name corresponding to the DNS name,
+		// which is currently being looked up, was found or not.
+		foundResolvedName := false
+		// removeResolvedName indicates whether the resolved name entry corresponding to the
+		// DNS name being looked up needs to be removed or not. The value of removeResolvedName
+		// will be true if the value of resolutionFailures of the resolved name is greater than
+		// equal to the configured failure threshold, otherwise the value of removeResolvedName
+		// will be false.
+		removeResolvedName := false
+		// statusUpdated indicates whether the status of the DNSNameResolver object should
+		// be updated or not.
+		statusUpdated := false
+
+		// Iterate through each resolved name present in the status of the DNSNameResolver object.
+		for index, resolvedName := range newResolverObj.Status.ResolvedNames {
+
+			// Check if the DNS name which is being resolved matches the current resolved name.
+			if strings.EqualFold(string(resolvedName.DNSName), dnsName) {
+
+				// As the resolved name for the DNS name being looked up is found, set foundResolvedName to true.
+				foundResolvedName = true
+				// Set existingIndex to the current value of the index variable to indicate the index at which the
+				// resolved name corresponding to the DNS name exists.
+				existingIndex = index
+
+				// Check whether the resolved name for the DNS name needs to be removed or not. If not, then update
+				// the resolved name entry to reflect the failure in DNS resolution.
+				removeResolvedName, statusUpdated =
+					checkAndUpdateResolvedName(index, newResolverObj, currentTime, resolver.failureThreshold, resolver.minimumTTL, rcode)
+			}
+
+			// Skip all the remaining resolved names, if the DNS name's resolved name is already found.
+			if foundResolvedName {
+				break
+			}
+		}
+
+		if !foundResolvedName {
+			// If the resolved name entry is not found then no update operation is required.
+			return nil
+		} else if removeResolvedName {
+			// Remove the resolved name entry if the resolutionFailures field's value is greater than or equal
+			// to the failure threshold.
+			newResolverObj.Status.ResolvedNames = append(newResolverObj.Status.ResolvedNames[:existingIndex], newResolverObj.Status.ResolvedNames[existingIndex+1:]...)
+			statusUpdated = true
+		}
+
+		// If there are no changes to the status of the DNSNameResolver object then skip the update status call.
+		if !statusUpdated {
+			return nil
+		}
+
+		// Update the status of the DNSNameResolver object.
+		_, err = resolver.kubeovnClient.DNSNameResolvers().UpdateStatus(ctx, newResolverObj, metav1.UpdateOptions{})
+		return err
+	})
+	if retryErr != nil {
+		log.Errorf("Encountered error while updating status of DNSNameResolver object: %v", retryErr)
+	}
 }
 
 // checkAndUpdateResolvedName checks whether the resolved name needs to be removed or not. If not, then the resolutionFailures
