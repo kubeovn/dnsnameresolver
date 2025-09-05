@@ -14,6 +14,7 @@ import (
 
 	"github.com/miekg/dns"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
 )
@@ -52,32 +53,11 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 	// Get the DNS name from the DNS lookup request.
 	qname := strings.ToLower(state.QName())
 
-	var regularDnsInfo, wildcardDnsInfo string
-	var regularDNSExists, wildcardDNSExists bool
+	// Find matching DNSNameResolver objects using lister
+	matchingObjects := resolver.findMatchingDNSNameResolvers(qname)
 
-	// Check if the query was for a wildcard DNS name or a regular DNS name.
-	if isWildcard(qname) {
-		// Get the wildcard DNS name info, if it exists.
-		resolver.wildcardMapLock.Lock()
-		wildcardDnsInfo, wildcardDNSExists = resolver.wildcardDNSInfo[qname]
-		resolver.wildcardMapLock.Unlock()
-	} else {
-		// Get the regular DNS name info, if it exists.
-		resolver.regularMapLock.Lock()
-		regularDnsInfo, regularDNSExists = resolver.regularDNSInfo[qname]
-		resolver.regularMapLock.Unlock()
-
-		// Get the corresponding wildcard DNS name for the reguar DNS name.
-		wildcard := getWildcard(qname)
-		// Get the wildcard DNS name info, if it exists.
-		resolver.wildcardMapLock.Lock()
-		wildcardDnsInfo, wildcardDNSExists = resolver.wildcardDNSInfo[wildcard]
-		resolver.wildcardMapLock.Unlock()
-	}
-
-	// If neither regular DNS name info nor wildcard DNS name info exists for the DNS name
-	// then return the response received from the plugin chain.
-	if !regularDNSExists && !wildcardDNSExists {
+	// If no matching objects found, return the response received from the plugin chain.
+	if len(matchingObjects) == 0 {
 		return plugin.NextOrFailure(resolver.Name(), resolver.Next, ctx, w, r)
 	}
 
@@ -115,68 +95,33 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 
 	// Check if the DNS lookup is unsuccessful or an error is encountered during the lookup.
 	if status != dns.RcodeSuccess || err != nil {
-		// WaitGroup variable used to wait for the completion of update of DNSNameResolver CRs
-		// corresponding to the regular and the wildcard DNS names.
+		// Update all matching objects for DNS lookup failure
 		var wg sync.WaitGroup
-
-		// If regular DNS name info exists then update the corresponding DNSNameResolver CR for
-		// the DNS lookup failure.
-		if regularDNSExists {
+		for _, obj := range matchingObjects {
 			wg.Add(1)
-			go func() {
+			go func(objName string) {
 				defer wg.Done()
-				resolver.updateResolvedNamesFailure(ctx, regularDnsInfo, qname, status)
-			}()
+				resolver.updateResolvedNamesFailure(ctx, objName, qname, status)
+			}(obj.Name)
 		}
-
-		// If wildcard DNS name info exists then update the corresponding DNSNameResolver CR for
-		// the DNS lookup failure.
-		if wildcardDNSExists {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				resolver.updateResolvedNamesFailure(ctx, wildcardDnsInfo, qname, status)
-			}()
-		}
-
-		// Wait for the goroutines to complete.
 		wg.Wait()
-
-		// Return the response received from the plugin chain.
 		return status, err
 	}
 
-	// If no IP address is Return the response received from the plugin chain.
+	// If no IP address is found, return the response received from the plugin chain.
 	if len(ipTTLs) == 0 {
 		return status, err
 	}
 
-	// WaitGroup variable used to wait for the completion of update of DNSNameResolver CRs
-	// corresponding to the regular and the wildcard DNS names.
+	// Update all matching objects for successful DNS lookup
 	var wg sync.WaitGroup
-
-	// If regular DNS name info exists then update the corresponding DNSNameResolver CR for
-	// the successful DNS lookup.
-	if regularDNSExists {
+	for _, obj := range matchingObjects {
 		wg.Add(1)
-		go func() {
+		go func(objName string) {
 			defer wg.Done()
-			resolver.updateResolvedNamesSuccess(ctx, regularDnsInfo, qname, ipTTLs)
-
-		}()
+			resolver.updateResolvedNamesSuccess(ctx, objName, qname, ipTTLs)
+		}(obj.Name)
 	}
-
-	// If wildcard DNS name info exists then update the corresponding DNSNameResolver CR for
-	// the successful DNS lookup.
-	if wildcardDNSExists {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			resolver.updateResolvedNamesSuccess(ctx, wildcardDnsInfo, qname, ipTTLs)
-		}()
-	}
-
-	// Wait for the goroutines to complete.
 	wg.Wait()
 
 	// Return the response received from the plugin chain.
@@ -185,6 +130,64 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 
 // Name implements the Handler interface.
 func (resolver *DNSNameResolver) Name() string { return pluginName }
+
+// findMatchingDNSNameResolvers finds DNSNameResolver objects that match the given DNS name
+func (resolver *DNSNameResolver) findMatchingDNSNameResolvers(qname string) []*kubeovnapiv1.DNSNameResolver {
+	var matchingObjects []*kubeovnapiv1.DNSNameResolver
+
+	// Get all DNSNameResolver objects from lister
+	lister := lister.NewDNSNameResolverLister(resolver.dnsNameResolverInformer.GetIndexer())
+	allObjects, err := lister.List(labels.Everything())
+	if err != nil {
+		log.Errorf("Failed to list DNSNameResolver objects: %v", err)
+		return matchingObjects
+	}
+
+	for _, obj := range allObjects {
+		dnsName := strings.ToLower(string(obj.Spec.Name))
+
+		// Check for exact match
+		if dnsName == qname {
+			matchingObjects = append(matchingObjects, obj)
+			continue
+		}
+
+		// Check for wildcard match
+		if isWildcard(dnsName) {
+			if resolver.matchesWildcard(qname, dnsName) {
+				matchingObjects = append(matchingObjects, obj)
+			}
+		} else {
+			// Check if qname is wildcard and matches this regular DNS name
+			if isWildcard(qname) && resolver.matchesWildcard(dnsName, qname) {
+				matchingObjects = append(matchingObjects, obj)
+			}
+		}
+	}
+
+	return matchingObjects
+}
+
+// matchesWildcard checks if a regular DNS name matches a wildcard pattern
+func (resolver *DNSNameResolver) matchesWildcard(regularName, wildcardName string) bool {
+	if !isWildcard(wildcardName) {
+		return false
+	}
+
+	// Remove the "*." prefix from wildcard
+	wildcardSuffix := wildcardName[2:]
+
+	// Check if regular name ends with the wildcard suffix and has exactly one more label
+	if !strings.HasSuffix(regularName, wildcardSuffix) {
+		return false
+	}
+
+	// Get the part before the suffix
+	prefix := regularName[:len(regularName)-len(wildcardSuffix)]
+
+	// The prefix should not contain dots (only one label allowed before wildcard)
+	return !strings.Contains(strings.TrimSuffix(prefix, "."), ".")
+}
 
 // updateResolvedNamesSuccess updates the ResolvedNames field of the corresponding DNSNameResolver object when DNS lookup is successfully completed.
 func (resolver *DNSNameResolver) updateResolvedNamesSuccess(
