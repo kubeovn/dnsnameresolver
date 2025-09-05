@@ -21,9 +21,17 @@ COPY . /go/src/dnsnameresolver/
 # Build CoreDNS with the dnsnameresolver plugin (reusing cached dependencies)
 RUN cd /coredns && \
     sed -i '/file:file/i dnsnameresolver:github.com/kubeovn/dnsnameresolver' plugin.cfg && \
+    go mod edit -replace k8s.io/api=k8s.io/api@v0.33.4 && \
+    go mod edit -replace k8s.io/apimachinery=k8s.io/apimachinery@v0.33.4 && \
+    go mod edit -replace k8s.io/client-go=k8s.io/client-go@v0.33.4 && \
+    go mod edit -replace k8s.io/kube-openapi=k8s.io/kube-openapi@v0.0.0-20250318190949-c8a335a9a2ff && \
     go mod edit -replace github.com/kubeovn/dnsnameresolver=/go/src/dnsnameresolver && \
+    go mod edit -require github.com/kubeovn/dnsnameresolver@v0.0.0 && \
+    go mod tidy && \
     go get github.com/kubeovn/dnsnameresolver && \
+    go mod tidy && \
     go generate && \
+    go mod tidy && \
     CGO_ENABLED=0 go build -ldflags "-X github.com/kubeovn/dnsnameresolver.Version=$PLUGIN_VERSION" -o /coredns/coredns .
 
 # Create the final image with CoreDNS binary

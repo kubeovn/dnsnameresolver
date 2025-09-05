@@ -6,8 +6,8 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned"
 	"github.com/miekg/dns"
-	// "github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned"
 
 	"k8s.io/client-go/tools/cache"
 )
@@ -15,7 +15,7 @@ import (
 type DNSNameResolver struct {
 	Next plugin.Handler
 
-	// networkClient versioned.Interface
+	networkClient           versioned.Interface
 	dnsNameResolverInformer cache.SharedIndexInformer
 }
 
