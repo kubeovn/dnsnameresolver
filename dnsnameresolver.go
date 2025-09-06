@@ -10,6 +10,7 @@ import (
 	kubeovnclient "github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned"
 	kubeovnclientv1 "github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned/typed/kubeovn/v1"
 	kubeovninformer "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions"
+	kubeovnlister "github.com/kubeovn/kube-ovn/pkg/client/listers/kubeovn/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 )
@@ -22,6 +23,7 @@ type DNSNameResolver struct {
 	// client and informer for handling DNSNameResolver objects.
 	kubeovnClient           kubeovnclientv1.KubeovnV1Interface
 	dnsNameResolverInformer cache.SharedIndexInformer
+	dnsNameResolverLister   kubeovnlister.DNSNameResolverLister
 	stopCh                  chan struct{}
 	stopLock                sync.Mutex
 	shutdown                bool
@@ -49,6 +51,9 @@ func (resolver *DNSNameResolver) initInformer(networkClient kubeovnclient.Interf
 	// Create the DNSNameResolver informer.
 	resolver.dnsNameResolverInformer = kubeovninformer.NewSharedInformerFactory(networkClient, defaultResyncPeriod).Kubeovn().V1().DNSNameResolvers().Informer()
 
+	// Get the lister for DNSNameResolver objects.
+	resolver.dnsNameResolverLister = kubeovnlister.NewDNSNameResolverLister(resolver.dnsNameResolverInformer.GetIndexer())
+
 	// No need for event handlers since we query lister directly
 	return nil
 }
@@ -67,8 +72,7 @@ func (resolver *DNSNameResolver) initPlugin() (func() error, func() error, error
 		return nil, nil, err
 	}
 
-	err = resolver.initInformer(networkClient)
-	if err != nil {
+	if err = resolver.initInformer(networkClient); err != nil {
 		return nil, nil, err
 	}
 

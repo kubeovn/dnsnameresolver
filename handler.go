@@ -11,7 +11,6 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
 	"github.com/coredns/coredns/request"
 	kubeovnapiv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
-	lister "github.com/kubeovn/kube-ovn/pkg/client/listers/kubeovn/v1"
 
 	"github.com/miekg/dns"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,10 +54,10 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 	qname := strings.ToLower(state.QName())
 
 	// Find matching DNSNameResolver objects using lister
-	matchingObjects := resolver.findMatchingDNSNameResolvers(qname)
+	matchingDNSNameResolvers := resolver.findMatchingDNSNameResolvers(qname)
 
 	// If no matching objects found, return the response received from the plugin chain.
-	if len(matchingObjects) == 0 {
+	if len(matchingDNSNameResolvers) == 0 {
 		return plugin.NextOrFailure(resolver.Name(), resolver.Next, ctx, w, r)
 	}
 
@@ -67,6 +66,22 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 
 	// Get the response for the DNS lookup from the plugin chain.
 	status, err := plugin.NextOrFailure(resolver.Name(), resolver.Next, ctx, rw, r)
+
+
+	// Check if the DNS lookup is unsuccessful or an error is encountered during the lookup.
+	if status != dns.RcodeSuccess || err != nil {
+		// Update all matching objects for DNS lookup failure
+		var wg sync.WaitGroup
+		for _, obj := range matchingDNSNameResolvers {
+			wg.Add(1)
+			go func(objName string) {
+				defer wg.Done()
+				resolver.updateResolvedNamesFailure(ctx, objName, qname, status)
+			}(obj.Name)
+		}
+		wg.Wait()
+		return status, err
+	}
 
 	// Get the IP addresses and the corresponding TTLs in a map. Only A and AAAA type DNS records
 	// are considered.
@@ -94,21 +109,6 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 		}
 	}
 
-	// Check if the DNS lookup is unsuccessful or an error is encountered during the lookup.
-	if status != dns.RcodeSuccess || err != nil {
-		// Update all matching objects for DNS lookup failure
-		var wg sync.WaitGroup
-		for _, obj := range matchingObjects {
-			wg.Add(1)
-			go func(objName string) {
-				defer wg.Done()
-				resolver.updateResolvedNamesFailure(ctx, objName, qname, status)
-			}(obj.Name)
-		}
-		wg.Wait()
-		return status, err
-	}
-
 	// If no IP address is found, return the response received from the plugin chain.
 	if len(ipTTLs) == 0 {
 		return status, err
@@ -116,7 +116,7 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 
 	// Update all matching objects for successful DNS lookup
 	var wg sync.WaitGroup
-	for _, obj := range matchingObjects {
+	for _, obj := range matchingDNSNameResolvers {
 		wg.Add(1)
 		go func(objName string) {
 			defer wg.Done()
@@ -134,39 +134,38 @@ func (resolver *DNSNameResolver) Name() string { return pluginName }
 
 // findMatchingDNSNameResolvers finds DNSNameResolver objects that match the given DNS name
 func (resolver *DNSNameResolver) findMatchingDNSNameResolvers(qname string) []*kubeovnapiv1.DNSNameResolver {
-	var matchingObjects []*kubeovnapiv1.DNSNameResolver
+	var matchingDNSNameResolvers []*kubeovnapiv1.DNSNameResolver
 
 	// Get all DNSNameResolver objects from lister
-	lister := lister.NewDNSNameResolverLister(resolver.dnsNameResolverInformer.GetIndexer())
-	allObjects, err := lister.List(labels.Everything())
+	dnsNameResolvers, err := resolver.dnsNameResolverLister.List(labels.Everything())
 	if err != nil {
 		log.Errorf("Failed to list DNSNameResolver objects: %v", err)
-		return matchingObjects
+		return matchingDNSNameResolvers
 	}
 
-	for _, obj := range allObjects {
-		dnsName := strings.ToLower(string(obj.Spec.Name))
+	for _, dnsNameResolver := range dnsNameResolvers {
+		dnsName := strings.ToLower(string(dnsNameResolver.Spec.Name))
 
 		// Check for exact match
 		if dnsName == qname {
-			matchingObjects = append(matchingObjects, obj)
+			matchingDNSNameResolvers = append(matchingDNSNameResolvers, dnsNameResolver)
 			continue
 		}
 
 		// Check for wildcard match
 		if isWildcard(dnsName) {
 			if resolver.matchesWildcard(qname, dnsName) {
-				matchingObjects = append(matchingObjects, obj)
+				matchingDNSNameResolvers = append(matchingDNSNameResolvers, dnsNameResolver)
 			}
 		} else {
 			// Check if qname is wildcard and matches this regular DNS name
 			if isWildcard(qname) && resolver.matchesWildcard(dnsName, qname) {
-				matchingObjects = append(matchingObjects, obj)
+				matchingDNSNameResolvers = append(matchingDNSNameResolvers, dnsNameResolver)
 			}
 		}
 	}
 
-	return matchingObjects
+	return matchingDNSNameResolvers
 }
 
 // matchesWildcard checks if a regular DNS name matches a wildcard pattern
@@ -207,8 +206,7 @@ func (resolver *DNSNameResolver) updateResolvedNamesSuccess(
 		)
 
 		// Fetch the DNSNameResolver object using the lister first.
-		resolverObj, err = lister.NewDNSNameResolverLister(
-			resolver.dnsNameResolverInformer.GetIndexer()).Get(objName)
+		resolverObj, err = resolver.dnsNameResolverLister.Get(objName)
 		if err != nil {
 			return err
 		}
@@ -569,8 +567,7 @@ func (resolver *DNSNameResolver) updateResolvedNamesFailure(ctx context.Context,
 			err             error
 		)
 		// Fetch the DNSNameResolver object using the lister first.
-		resolverObj, err = lister.NewDNSNameResolverLister(
-			resolver.dnsNameResolverInformer.GetIndexer()).Get(objName)
+		resolverObj, err = resolver.dnsNameResolverLister.Get(objName)
 		if err != nil {
 			return err
 		}
