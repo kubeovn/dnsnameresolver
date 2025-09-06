@@ -76,7 +76,7 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 			if rec, ok := answer.(*dns.A); ok {
 				ttl := int32(rec.Hdr.Ttl)
 				if ttl == 0 {
-					ttl = resolver.minimumTTL
+					ttl = defaultMinTTL
 				}
 				ipTTLs[rec.A.String()] = ttl
 			}
@@ -84,7 +84,7 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 			if rec, ok := answer.(*dns.AAAA); ok {
 				ttl := int32(rec.Hdr.Ttl)
 				if ttl == 0 {
-					ttl = resolver.minimumTTL
+					ttl = defaultMinTTL
 				}
 				ipTTLs[rec.AAAA.String()] = ttl
 			}
@@ -626,7 +626,7 @@ func (resolver *DNSNameResolver) updateResolvedNamesFailure(ctx context.Context,
 				// Check whether the resolved name for the DNS name needs to be removed or not. If not, then update
 				// the resolved name entry to reflect the failure in DNS resolution.
 				removeResolvedName, statusUpdated =
-					checkAndUpdateResolvedName(index, newResolverObj, currentTime, resolver.failureThreshold, resolver.minimumTTL, rcode)
+					checkAndUpdateResolvedName(index, newResolverObj, currentTime, rcode)
 			}
 
 			// Skip all the remaining resolved names, if the DNS name's resolved name is already found.
@@ -665,13 +665,11 @@ func checkAndUpdateResolvedName(
 	index int,
 	newResolverObj *kubeovnapiv1.DNSNameResolver,
 	currentTime metav1.Time,
-	failureThreshold int32,
-	minimumTTL int32,
 	rcode int,
 ) (removeResolvedName bool, statusUpdated bool) {
 
 	// Check if the resolutionFailures of the resolved name is greater than or equal to the failure threshold.
-	if newResolverObj.Status.ResolvedNames[index].ResolutionFailures >= failureThreshold {
+	if newResolverObj.Status.ResolvedNames[index].ResolutionFailures >= defaultFailureThreshold {
 		removeResolvedName = true
 
 		// Iterate through each of the IP addresses associated to the DNS name and check if the corresponding TTL
@@ -698,7 +696,7 @@ func checkAndUpdateResolvedName(
 			nextLookupTime := resolvedAdress.LastLookupTime.Time.Add(time.Duration(resolvedAdress.TTLSeconds) * time.Second)
 			if !nextLookupTime.After(currentTime.Time) ||
 				isSameNextLookupTime(resolvedAdress.LastLookupTime.Time, resolvedAdress.TTLSeconds, 0) {
-				newResolverObj.Status.ResolvedNames[index].ResolvedAddresses[i].TTLSeconds = minimumTTL
+				newResolverObj.Status.ResolvedNames[index].ResolvedAddresses[i].TTLSeconds = defaultMinTTL
 				newResolverObj.Status.ResolvedNames[index].ResolvedAddresses[i].LastLookupTime = &currentTime
 			}
 		}

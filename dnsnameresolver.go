@@ -19,9 +19,6 @@ import (
 type DNSNameResolver struct {
 	Next plugin.Handler
 
-	minimumTTL       int32
-	failureThreshold int32
-
 	// client and informer for handling DNSNameResolver objects.
 	kubeovnClient           kubeovnclientv1.KubeovnV1Interface
 	dnsNameResolverInformer cache.SharedIndexInformer
@@ -32,18 +29,15 @@ type DNSNameResolver struct {
 
 // New returns an initialized DNSNameResolver with default settings.
 func New() *DNSNameResolver {
-	return &DNSNameResolver{
-		minimumTTL:       defaultMinTTL,
-		failureThreshold: defaultFailureThreshold,
-	}
+	return &DNSNameResolver{}
 }
 
 const (
 	// defaultResyncPeriod gives the resync period used for creating the DNSNameResolver informer.
 	defaultResyncPeriod = 24 * time.Hour
-	// defaultMinTTL will be used when minTTL is not explicitly configured.
+	// defaultMinTTL is the minimum TTL for DNS records.
 	defaultMinTTL int32 = 5
-	// defaultFailureThreshold will be used when failureThreshold is not explicitly configured.
+	// defaultFailureThreshold is the number of failures before removing a resolved name.
 	defaultFailureThreshold int32 = 5
 )
 
