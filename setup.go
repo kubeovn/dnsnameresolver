@@ -40,19 +40,14 @@ func setup(c *caddy.Controller) error {
 func resolverParse(c *caddy.Controller) (*DNSNameResolver, error) {
 	resolver := New()
 
-	i := 0
 	for c.Next() {
-		if i > 0 {
-			return nil, plugin.ErrOnce
-		}
-		i++
-
 		// There shouldn't be any more arguments.
 		if len(c.RemainingArgs()) != 0 {
 			return nil, c.ArgErr()
 		}
 
-		for c.NextBlock() {
+		// No configuration parameters are supported
+		if c.NextBlock() {
 			return nil, c.Errf("unknown property %q", c.Val())
 		}
 	}

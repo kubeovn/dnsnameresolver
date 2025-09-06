@@ -53,10 +53,10 @@ func (resolver *DNSNameResolver) initInformer(networkClient kubeovnclient.Interf
 	return nil
 }
 
-// initPlugin initializes the ocp_dnsnameresolver plugin and returns the plugin startup and
+// initPlugin initializes the dnsnameresolver plugin and returns the plugin startup and
 // shutdown callback functions.
 func (resolver *DNSNameResolver) initPlugin() (func() error, func() error, error) {
-	// Create a client supporting network.openshift.io apis.
+	// Create a client supporting kube-ovn apis.
 	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, nil, err
