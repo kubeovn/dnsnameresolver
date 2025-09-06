@@ -2,6 +2,7 @@ package dnsnameresolver
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -475,9 +476,7 @@ func isRegularMatchingWildcardResolvedName(
 	}
 
 	// Add all the current IP addresses associated with the wildcard DNS name with the corresponding TTLs.
-	for ip, ttl := range ipTTLs {
-		wildcardIPTTLs[ip] = ttl
-	}
+	maps.Copy(wildcardIPTTLs, ipTTLs)
 
 	// Iterate through all the associated IP addresses of the regular DNS name and check if all of them
 	// are also associated with the wildcard DNS name, and the corresponding next lookup time of the

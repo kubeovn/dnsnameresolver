@@ -14,20 +14,6 @@ func isWildcard(dnsName string) bool {
 	return strings.HasPrefix(dnsName, "*.")
 }
 
-// getWildcard converts a regular DNS name to a wildcard DNS name. The
-// input should be a valid fqdn.
-func getWildcard(dnsName string) string {
-	if isWildcard(dnsName) {
-		return dnsName
-	}
-	dotIndex := strings.Index(dnsName, ".")
-	if dotIndex == -1 {
-		// If there's no dot, return the original name (not a valid FQDN case)
-		return dnsName
-	}
-	return "*" + dnsName[dotIndex:]
-}
-
 // isSameNextLookupTime checks if the existing next lookup time (existing last lookup time + existing ttl)
 // and the current next lookup time (current time + current ttl) are within a margin of 5 seconds of each
 // other.
