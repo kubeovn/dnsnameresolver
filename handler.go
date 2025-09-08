@@ -68,7 +68,6 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 	// Get the response for the DNS lookup from the plugin chain.
 	status, err := plugin.NextOrFailure(resolver.Name(), resolver.Next, ctx, rw, r)
 
-
 	// Check if the DNS lookup is unsuccessful or an error is encountered during the lookup.
 	if status != dns.RcodeSuccess || err != nil {
 		// Update all matching objects for DNS lookup failure
@@ -144,7 +143,7 @@ func (resolver *DNSNameResolver) findMatchingDNSNameResolvers(qname string) []*k
 		return matchingDNSNameResolvers
 	}
 	log.Infof("Found %d DNSNameResolver objects", len(dnsNameResolvers))
-	
+
 	for _, dnsNameResolver := range dnsNameResolvers {
 		dnsName := strings.ToLower(string(dnsNameResolver.Spec.Name))
 
@@ -229,6 +228,13 @@ func (resolver *DNSNameResolver) updateResolvedNamesSuccess(
 
 		// Make a copy of the object. All the updates will be applied to the copied object.
 		newResolverObj := resolverObj.DeepCopy()
+		// Ensure TypeMeta fields are set correctly for UpdateStatus operation
+		if newResolverObj.Kind == "" {
+			newResolverObj.Kind = "DNSNameResolver"
+		}
+		if newResolverObj.APIVersion == "" {
+			newResolverObj.APIVersion = "kubeovn.io/v1"
+		}
 		// Get the DNS name from the spec.name field.
 		specDNSName := string(newResolverObj.Spec.Name)
 		// Get the current time.
@@ -590,6 +596,13 @@ func (resolver *DNSNameResolver) updateResolvedNamesFailure(ctx context.Context,
 
 		// Make a copy of the object. All the updates will be applied to the copied object.
 		newResolverObj := resolverObj.DeepCopy()
+		// Ensure TypeMeta fields are set correctly for UpdateStatus operation
+		if newResolverObj.Kind == "" {
+			newResolverObj.Kind = "DNSNameResolver"
+		}
+		if newResolverObj.APIVersion == "" {
+			newResolverObj.APIVersion = "kubeovn.io/v1"
+		}
 		// Get the current time.
 		currentTime := metav1.NewTime(time.Now())
 
