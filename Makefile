@@ -58,6 +58,16 @@ clean:
 	docker rmi $(IMAGE_NAME):$(IMAGE_TAG) || true
 	docker system prune -f
 
+.PHONY: install
+install:
+	kubectl apply -f manifest/crd.yaml
+	kubectl apply -f manifest/rbac.yaml
+	kubectl apply -f manifest/cm.yaml
+	kind load docker-image $(IMAGE_NAME):$(IMAGE_TAG) --name kube-ovn
+	kubectl set image deployment/coredns coredns=$(IMAGE_NAME):$(IMAGE_TAG) -n kube-system
+	kubectl delete pod -n kube-system -lk8s-app=kube-dns
+	kubectl get pod -n kube-system -lk8s-app=kube-dns
+
 # Show help
 .PHONY: help
 help:

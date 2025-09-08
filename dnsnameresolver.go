@@ -79,6 +79,8 @@ func (resolver *DNSNameResolver) initPlugin() (func() error, func() error, error
 	resolver.stopCh = make(chan struct{})
 
 	onStart := func() error {
+		time.Sleep(10 * time.Second)
+		log.Info("Starting DNS Name Resolver Informer")
 		go func() {
 			resolver.dnsNameResolverInformer.Run(resolver.stopCh)
 		}()
@@ -95,6 +97,7 @@ func (resolver *DNSNameResolver) initPlugin() (func() error, func() error, error
 			select {
 			case <-checkSyncTicker.C:
 				if resolver.dnsNameResolverInformer.HasSynced() {
+					log.Info("DNS Name Resolver Informer synced successfully")
 					return nil
 				}
 			case <-logTicker.C:

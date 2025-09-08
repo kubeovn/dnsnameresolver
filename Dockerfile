@@ -20,7 +20,7 @@ COPY . /go/src/dnsnameresolver/
 
 # Build CoreDNS with the dnsnameresolver plugin (reusing cached dependencies)
 RUN cd /coredns && \
-    sed -i '/file:file/i dnsnameresolver:github.com/kubeovn/dnsnameresolver' plugin.cfg && \
+    sed -i '/root:root/i dnsnameresolver:github.com/kubeovn/dnsnameresolver' plugin.cfg && \
     go mod edit -replace k8s.io/api=k8s.io/api@v0.33.4 && \
     go mod edit -replace k8s.io/apimachinery=k8s.io/apimachinery@v0.33.4 && \
     go mod edit -replace k8s.io/client-go=k8s.io/client-go@v0.33.4 && \
