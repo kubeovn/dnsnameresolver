@@ -52,10 +52,11 @@ func (resolver *DNSNameResolver) ServeDNS(ctx context.Context, w dns.ResponseWri
 
 	// Get the DNS name from the DNS lookup request.
 	qname := strings.ToLower(state.QName())
+	log.Infof("DNS lookup request for %s", qname)
 
 	// Find matching DNSNameResolver objects using lister
 	matchingDNSNameResolvers := resolver.findMatchingDNSNameResolvers(qname)
-
+	log.Infof("Found %d matching DNSNameResolver objects", len(matchingDNSNameResolvers))
 	// If no matching objects found, return the response received from the plugin chain.
 	if len(matchingDNSNameResolvers) == 0 {
 		return plugin.NextOrFailure(resolver.Name(), resolver.Next, ctx, w, r)
@@ -142,7 +143,8 @@ func (resolver *DNSNameResolver) findMatchingDNSNameResolvers(qname string) []*k
 		log.Errorf("Failed to list DNSNameResolver objects: %v", err)
 		return matchingDNSNameResolvers
 	}
-
+	log.Infof("Found %d DNSNameResolver objects", len(dnsNameResolvers))
+	
 	for _, dnsNameResolver := range dnsNameResolvers {
 		dnsName := strings.ToLower(string(dnsNameResolver.Spec.Name))
 

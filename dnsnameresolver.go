@@ -11,9 +11,14 @@ import (
 	kubeovnclientv1 "github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned/typed/kubeovn/v1"
 	kubeovninformer "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions"
 	kubeovnlister "github.com/kubeovn/kube-ovn/pkg/client/listers/kubeovn/v1"
+	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 )
+
+var scheme = runtime.NewScheme()
 
 // DNSNameResolver is a plugin that looks up responses from other plugins
 // and updates the status of DNSNameResolver objects.
@@ -61,13 +66,16 @@ func (resolver *DNSNameResolver) initInformer(networkClient kubeovnclient.Interf
 // initPlugin initializes the dnsnameresolver plugin and returns the plugin startup and
 // shutdown callback functions.
 func (resolver *DNSNameResolver) initPlugin() (func() error, func() error, error) {
+	utilruntime.Must(kubeovnv1.AddToScheme(scheme))
 	// Create a client supporting kube-ovn apis.
 	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, nil, err
 	}
-
-	networkClient, err := kubeovnclient.NewForConfig(kubeConfig)
+	cfg := rest.CopyConfig(kubeConfig)
+	cfg.UserAgent = "coredns-dnsnameresolver/1.0"
+	cfg.QPS, cfg.Burst = 30, 60
+	networkClient, err := kubeovnclient.NewForConfig(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -79,9 +87,8 @@ func (resolver *DNSNameResolver) initPlugin() (func() error, func() error, error
 	resolver.stopCh = make(chan struct{})
 
 	onStart := func() error {
-		time.Sleep(10 * time.Second)
-		log.Info("Starting DNS Name Resolver Informer")
 		go func() {
+			log.Info("Starting DNS Name Resolver Informer")
 			resolver.dnsNameResolverInformer.Run(resolver.stopCh)
 		}()
 

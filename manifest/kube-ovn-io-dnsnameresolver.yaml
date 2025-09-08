@@ -1,0 +1,6 @@
+apiVersion: kubeovn.io/v1
+kind: DNSNameResolver
+metadata:
+  name: kube-ovn-io
+spec:
+  name: kube-ovn.io.

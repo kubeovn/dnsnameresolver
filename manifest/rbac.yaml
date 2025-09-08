@@ -4,7 +4,7 @@ metadata:
   name: dnsnameresolver-manager
 rules:
 - apiGroups: ["kubeovn.io"]
-  resources: ["dnsnameresolvers"]
+  resources: ["dnsnameresolvers", "dnsnameresolvers/status"]
   verbs: ["list", "get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
