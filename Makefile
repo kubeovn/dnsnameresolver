@@ -3,7 +3,7 @@ IMAGE_NAME := dnsnameresolver
 IMAGE_TAG := dev
 COREDNS_VERSION := v1.12.3
 PLUGIN_VERSION := dev
-REGISTRY ?= 
+REGISTRY ?= kubeovn
 
 # Default target
 .PHONY: all
@@ -15,7 +15,7 @@ build:
 	docker build \
 		--build-arg COREDNS_VERSION=$(COREDNS_VERSION) \
 		--build-arg PLUGIN_VERSION=$(PLUGIN_VERSION) \
-		-t $(IMAGE_NAME):$(IMAGE_TAG) .
+		-t $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) .
 
 # Build with specific version
 .PHONY: build-version
@@ -27,35 +27,30 @@ build-version:
 	docker build \
 		--build-arg COREDNS_VERSION=$(COREDNS_VERSION) \
 		--build-arg PLUGIN_VERSION=$(VERSION) \
-		-t $(IMAGE_NAME):$(VERSION) .
+		-t $(REGISTRY)/$(IMAGE_NAME):$(VERSION) .
 
 # Test the built image
 .PHONY: test
 test:
 	@echo "Testing CoreDNS version..."
-	docker run --rm $(IMAGE_NAME):$(IMAGE_TAG) -version
+	docker run --rm $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) -version
 	@echo "\nTesting plugin integration..."
-	docker run --rm $(IMAGE_NAME):$(IMAGE_TAG) -plugins | grep dnsnameresolver
+	docker run --rm $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) -plugins | grep dnsnameresolver
 
 # Run the image (for testing)
 .PHONY: run
 run:
-	docker run --rm -p 53:53/udp $(IMAGE_NAME):$(IMAGE_TAG)
+	docker run --rm -p 53:53/udp $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
 
 # Push to registry
 .PHONY: push
 push:
-	@if [ -z "$(REGISTRY)" ]; then \
-		echo "Error: REGISTRY is required. Usage: make push REGISTRY=your-registry.com"; \
-		exit 1; \
-	fi
-	docker tag $(IMAGE_NAME):$(IMAGE_TAG) $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
 	docker push $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
 
 # Clean up images
 .PHONY: clean
 clean:
-	docker rmi $(IMAGE_NAME):$(IMAGE_TAG) || true
+	docker rmi $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) || true
 	docker system prune -f
 
 .PHONY: install
@@ -63,8 +58,8 @@ install:
 	kubectl apply -f manifest/crd.yaml
 	kubectl apply -f manifest/rbac.yaml
 	kubectl apply -f manifest/cm.yaml
-	kind load docker-image $(IMAGE_NAME):$(IMAGE_TAG) --name kube-ovn
-	kubectl set image deployment/coredns coredns=$(IMAGE_NAME):$(IMAGE_TAG) -n kube-system
+	kind load docker-image $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) --name kube-ovn
+	kubectl set image deployment/coredns coredns=$(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) -n kube-system
 	kubectl delete pod -n kube-system -lk8s-app=kube-dns
 	kubectl get pod -n kube-system -lk8s-app=kube-dns
 
