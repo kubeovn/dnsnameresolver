@@ -11,14 +11,9 @@ import (
 	kubeovnclientv1 "github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned/typed/kubeovn/v1"
 	kubeovninformer "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions"
 	kubeovnlister "github.com/kubeovn/kube-ovn/pkg/client/listers/kubeovn/v1"
-	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 )
-
-var scheme = runtime.NewScheme()
 
 // DNSNameResolver is a plugin that looks up responses from other plugins
 // and updates the status of DNSNameResolver objects.
@@ -66,7 +61,6 @@ func (resolver *DNSNameResolver) initInformer(networkClient kubeovnclient.Interf
 // initPlugin initializes the dnsnameresolver plugin and returns the plugin startup and
 // shutdown callback functions.
 func (resolver *DNSNameResolver) initPlugin() (func() error, func() error, error) {
-	utilruntime.Must(kubeovnv1.AddToScheme(scheme))
 	// Create a client supporting kube-ovn apis.
 	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
