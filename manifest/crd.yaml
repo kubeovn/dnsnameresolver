@@ -12,6 +12,15 @@ spec:
   scope: Cluster
   versions:
     - name: v1
+      additionalPrinterColumns:
+        - description: DNS name to be resolved
+          jsonPath: .spec.name
+          name: DNS Name
+          type: string
+        - description: Resolved IP addresses
+          jsonPath: .status.resolvedNames[*].resolvedAddresses[*].ip
+          name: Resolved IPs
+          type: string
       schema:
         openAPIV3Schema:
           description: "DNSNameResolver stores the DNS name resolution information of a DNS name. It can be enabled by the TechPreviewNoUpgrade feature set. It can also be enabled by the feature gate DNSNameResolver when using CustomNoUpgrade feature set. \n Compatibility level 4: No compatibility is provided, the API can change at any point for any reason. These capabilities should not be used by applications needing long term support."
